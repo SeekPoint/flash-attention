@@ -36,7 +36,8 @@
 namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//实就是通过ldmatrix指令将数据从shared mem中load到寄存器中，
+//首先看下Gemm_Q_K的继承关系，成员就是Fragment和两个Smem_tile，Fragment的核心成员就是多个32位寄存器变量。
 template<typename Kernel_traits>
 struct Gemm_Q_K_base {
     using Smem_tile_o = typename Kernel_traits::Smem_tile_o;
@@ -108,6 +109,7 @@ struct Gemm_Q_K : public Gemm_Q_K_base<Kernel_traits> {
         }
     }
 
+//然后执行矩阵运算，注意这里做了访存和计算的流水线，先load下一个矩阵，再执行当前的计算，结果存到Fragment acc_p的寄存器中。
     template<typename Acc, int M, int N>
     __device__ inline void operator()(Acc (&acc_p)[M][N]){
         // Do this part of P^T = (Q * K^T)^T.
@@ -253,10 +255,15 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     // How many steps to jump per iteration, which is the same as params.num_splits.
     const int step_stride = gridDim.z;
 
+////然后是最核心的一次内层循环的流程
     const BlockInfoPadded<Kernel_traits::THREADS> binfo(params, bidb, bidh, tidx);
     // if( binfo.stop_early() ) return;
     if( binfo.stop_early(loop_step_idx * Cta_tile_p::N) ) return;
 
+    /*
+    global mem到寄存器
+    然后实例化gemm_q_k，负责第一个gemm，后边介绍，即QK，后边介绍。gmem_q负责将Q矩阵从global mem中load到寄存器
+    */
     Gemm1 gemm_q_k(smem_, tidx);
     // Allocate the global memory tile loader for Q.
     Gmem_tile_q gmem_q(params.q_ptr, params.q_row_stride_in_elts, params.q_head_stride_in_elts,
@@ -317,7 +324,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         gmem_v.move(loop_step_idx);
         if (Return_softmax) { gmem_s.move(loop_step_idx * steps_og); }
     }
-
+//## 寄存器到共享内存 然后回看内循环流程，先触发q，k，v从global mem load的过程，然后将q，v加载到共享内存
     // Trigger the loads for K.
     gmem_k.load();
     // Trigger the loads for Q.
@@ -348,7 +355,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
     }
 
     __syncthreads();
-
+## Q乘K 然后再回看内循环流程，gemm_q_k负责第一个矩阵运算，即QK，这里会load Q和K。
     // Load the fragments for Q.
     gemm_q_k.load_q();
 
@@ -397,6 +404,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         //     printf("acc_p=%.6f, %.6f\n", acc_p[0][0].elt(0), acc_p[0][0].elt(1));
         // }
 
+//然后计算   027.png
         uint4 out[Gmem_tile_o::STGS_PER_LOOP];
         if (!Is_first) { gmem_o_tmp.load(out, 0); }
 
@@ -409,6 +417,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
         // Load the mask for that iteration.
         mask.load(begin + l);
+
+//
+//然后继续看下内循环
 
         // Convert from the accumulator type to FP32 for Softmax.
         softmax.unpack_noscale(acc_p);
@@ -425,6 +436,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         //         printf("p_prev_lse=%.6f, %.6f\n", p_prev_lse[0], p_prev_lse[1]);
         //     }
         // }
+
+//之后的外循环会先计算max，不过new_max = max(prev_lse, cur_max)，
+//这里是为了实现方便，只保存lse，而不需要保存max，效果上是等价的，new_max一定大于max。
         // Compute the max.
         float p_max[Mma_tile_p::MMAS_M * 2];
         if (!Is_first) {
@@ -453,6 +467,9 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         //     }
         // }
 
+//到这里，最大值就计算出来存到p_max中了。
+//
+//然后根据max计算exp
         // Compute the exponential value.
         // softmax.apply_exp(p_max);
         softmax.scale_apply_exp(p_max, params.scale_bmm1f);
@@ -463,6 +480,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         //     }
         // }
 
+//然后计算sum，这里sum整体流程和求max完全一致，不过只执行到第三步，即将quad reduce的结果写回到shared mem，原因后续会提到
         // Compute the sum.
         float p_sum[Mma_tile_p::MMAS_M * 2];
         // if (!Is_first) {
@@ -504,6 +522,19 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
             unsigned long long philox_subsequence = (begin + l) * (binfo.actual_seqlen_k / 16) + block_col_idx;
             softmax.template apply_dropout_16bits<encode_dropout_in_sign_bit>(ph, params.p_dropout_in_uint16_t, philox_subsequence);
         }
+
+//然后将softmax的结果，并将softmax的FP32转为FP16存到frag_p中
+
+//P乘V
+//然后开始算PxV，P的shape为[16, 128]，V的shape为[128, 32]，对于QxK的warp是在M维度分块，PxV的分块在K维度，具体分块逻辑如图3-7，黄色部分为warp0负责计算。
+//025.png
+//图 3-8
+//不过这里每个warp都有一个O矩阵，还需要将warp间的O进行reduce，这里对O的的线程分块和P不一致，
+//因此之前在求sum的时候只执行到了第三步，原因就是线程对应的数据分块变了。
+//具体的，这里用于reduce的share mem大小为16x128，每个warp将自己的16x32结果存到share mem的32列，
+//如图3-8，颜色区域为第一个warp写入的。
+//026.png
+//图 3-9
 
         using Frag_p = fmha::Fragment_a<fmha::Row>;
         Frag_p frag_p[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M];
@@ -582,12 +613,20 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         static_assert(Mma_tile_o::MMAS_M == 1);
         float p_sum_o[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
         softmax.reduce_sum_after_sync_(p_sum_o, rows);
+
         if (!Is_first) {
+//        然后计算p_prev_scale_o，即(e ^(m_i - m_i^new) ) * l_i，和p_sum_o，即 l_i ^ new，
+//        由于p_sum_o计算过程中使用的是new_max，所以不需要对p_sum_o进行修正。
             for (int jj = 0; jj < Gmem_tile_o::STGS_PER_LOOP; jj++) {
                 p_prev_scale_o[jj] = expf(p_prev_scale_o[jj] - p_max_o[jj][0]);
                 p_sum_o[jj][0] += p_prev_scale_o[jj];
             }
         }
+
+//然后再load出去，每个线程load 4行，一行8个线程，load的过程中执行reduce。
+//除以sum之后就完成了第一次O的计算，写回global mem。
+//## 递推过程 重复内循环直到完成第一次外循环，第一次外循环的计算流程本质和朴素算法一致，然后看下之后的外循环是如何完成递推的。
+//第一次外循环中会将中间变量写到global mem，比如o_tmp，就是O的中间结果，还保存了gmem_softmax_lse，代表max + log(sum)
 
         float p_sum_log[Gmem_tile_o::STGS_PER_LOOP][Mma_tile_o::MMAS_M];
         #pragma unroll
@@ -659,7 +698,8 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//然后看下kernel，这里就是论文中的外层循环，
+//每次计算完成k矩阵的一个block计算，blockIdx.x表示哪个batch，blockIdx.y表示哪个head。
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Return_softmax, typename Params>
 inline __device__ void device_1xN_loop(const Params &params) {
 

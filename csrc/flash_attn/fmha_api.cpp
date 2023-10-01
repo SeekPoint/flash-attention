@@ -186,6 +186,7 @@ void run_fmha_fwd(Launch_params<FMHA_fprop_params> &launch_params) {
     }
 }
 
+//# 源码流程 ## 两层循环流程控制 前向入口为mha_fwd
 std::vector<at::Tensor>
 mha_fwd(const at::Tensor &q,         // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
         const at::Tensor &k,         // total_k x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
@@ -211,6 +212,11 @@ mha_fwd(const at::Tensor &q,         // total_q x num_heads x head_size, total_q
     TORCH_CHECK(is_sm90 || is_sm8x || is_sm75);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     bool is_dropout = p_dropout > 0.0;
+    /*
+    q，k，v的shape均为[total_q, num_heads, head_size]，dtype为FP16或者BF16，total_q就是按照batchsize累加token，
+    cu_seqlens_q为每个batch的token数量的前缀和
+    不加说明的话假设后续total_q和total_k相等，head_size为32，dtype为FP16
+    */
     Launch_params<FMHA_fprop_params> launch_params(dprops, stream, is_dropout, return_softmax);
 
     auto q_dtype = q.dtype();

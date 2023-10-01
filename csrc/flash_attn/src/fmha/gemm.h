@@ -240,6 +240,18 @@ struct Clear_accumulator<float, WARPS_K> {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+//这里gemm_cl用了cutlass，我们直接看下原始apex的逻辑，
+//其实就是对每个16x16的tile执行mma函数，mma函数中会执行两次16x8x16的mma.sync
+
+//对于第一个线程的第一个acc_p的第一个Fragment，寄存器和结果矩阵对应关系如下，黄色为第一个16x8，蓝色为第二个16x8
+//020.png
+//
+//图 3-3
+//cta中warp的组织格式为m1n4k1，Q矩阵为16x32，K矩阵为32x128，warp排布如下，
+//图3-3对应图3-4 warp0的第一个16x16的计算结果w01
+//021.png
+//图 3-4
+
 
 template<typename Acc, typename A, typename B, int M, int N>
 inline __device__ void gemm(Acc (&acc)[M][N], const A (&a)[M], const B (&b)[N]) {
@@ -368,20 +380,20 @@ inline __device__ void gemm_cl(Acc (&acc)[M][N], const A (&a)[M], const B (&b)[N
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//cta_tile表示一个计算矩阵乘的cta线程怎么排布，去处理一个多大的tile，对于第一个矩阵乘Cta_tile_p相关变量见注释
 template<
     // The number of rows in the CTA tile.
-    int M_,
+    int M_,       // STEP  ：16
     // The number of cols in the CTA tile.
-    int N_,
+    int N_,       // S  ：128
     // The number of elements in the the K dimension of the GEMM loop.
-    int K_,
+    int K_,       // D ：32
     // The number of rows of warps.
-    int WARPS_M_,
+    int WARPS_M_, // 4
     // The number of cols of warps.
-    int WARPS_N_,
+    int WARPS_N_, // 1
     // The number of warps in the K dimension of the GEMM loop.
-    int WARPS_K_>
+    int WARPS_K_> // 1
 struct Cta_tile_ {
 
     static constexpr int M = M_, N = N_, K = K_;

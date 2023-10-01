@@ -39,7 +39,7 @@
 namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//BlockInfoPadded的核心就是sum_s_q和actual_seqlen_q，分别表示前边的batch一共有多少token，和当前batch有多少token
 template<int THREADS_PER_CTA>
 struct BlockInfoPadded {
 

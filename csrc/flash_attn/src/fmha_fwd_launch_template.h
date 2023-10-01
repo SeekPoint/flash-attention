@@ -82,6 +82,9 @@ void run_fmha_fwd_loop(Launch_params<FMHA_fprop_params> &launch_params) {
                 /*max_splits=*/std::min(30, (launch_params.params.seqlen_q + M - 1 / M))
             );
         }
+
+        //然后通过run_fmha_fwd_loop启动kernel，简便起见，
+        //假设num_splits为1，所以一共启动了[batch_size, num_head]个cta，每个cta负责一个batch里的一个head
         // printf("smem_size = %d\n", smem_size);
         dim3 grid(launch_params.params.b, launch_params.params.h, launch_params.params.num_splits);
         kernel<<<grid, Kernel_traits::THREADS, smem_size, launch_params.stream>>>(

@@ -1115,6 +1115,16 @@ static __device__ inline T run(T x, Operator &op) {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+//第二步执行warp内同一行的reduce，T0-3一行，T4-7一行，因此要执行quad之间的reduce，这里使用warp shuffle来做的，
+//经过第一次shuffle之后T0 = max(T0, T2)，T1 = max(T1, T3)，经过第二次shuffle之后T0就拿到了当前warp当前行(即第0行)的最大值
+//第三步会将warp内的每行的最大值写入到shared mem，只有每个quad的第0个线程会写，写完之后如图3-5
+//
+//023.png
+//图 3-6
+//第四步所有warp都会按照图3-6的数据线程排布将数据从share mem中load出来，这样每个线程就拿到了当前行其他warp的数值
+//
+//024.png
+//图 3-7
 
 template<typename Operator, int M>
 __device__ inline void  quad_reduce(float (&dst)[M], float (&src)[M], Operator &op) {
@@ -1164,6 +1174,8 @@ __device__ inline void quad_reduce(__half2 (&dst)[M], float2 (&src)[M], Operator
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+//第五步执行quad_allreduce，也是通过warp shuffle做的，以quad0为例，第一次T0 = T2 = max(T0, T2)，T1 = T3 = max(T1, T3)，
+//第二次T0 = T1 = max(T0, T1)，T2 = T3 = max(T2, T3)，这样每个线程就都拿到了当前行的最大值。
 
 template<typename Operator, int M>
 __device__ inline void quad_allreduce(float (&dst)[M], float (&src)[M], Operator &op) {

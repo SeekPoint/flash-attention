@@ -30,7 +30,9 @@
 #pragma once
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//FMHA_kernel_traits 为当前规模下的各种类型定义，先看下Q相关的几个，注释写了当前规模下的值，elem_type为__half
+//
+//        // 128     32        16      1            4
 template<int S, int D, int STEP, int WARPS_M, int WARPS_N, uint32_t FLAGS = 0x08u, typename elem_type_=__half>
 struct FMHA_kernel_traits {
 

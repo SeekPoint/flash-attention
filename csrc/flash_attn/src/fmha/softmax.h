@@ -143,7 +143,8 @@ struct Smem_tile_reduce {
 
 };
 
-
+//到现在就完成了QK的计算 ## softmax 接下来要计算max，看下Softmax这个类，
+//核心数据结构如下，其中elt_是存储acc_p的输出，Smem_tile_red为共享内存，用于计算P的max和sum
 template<typename Cta_tile, typename Kernel_traits>
 struct Softmax_base {
 
@@ -508,6 +509,11 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         }
     }
 
+//首先通过unpack_noscale将数据从acc_p中存到Softmax的elt_。
+//w00 unpack之后的数据在softmax中分布如图3-4左侧k = 0,1,2,3，w01 unpack之后如图3-4右侧k = 4,5,6,7
+//在这里插入图片描述
+// 022.png
+//图 3-5
     // Scale FP32 fragments
     inline __device__ void unpack_noscale(const Accumulator (&acc)[MMAS_M][MMAS_N]) {
 
@@ -529,6 +535,8 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         }
     }
 
+//第一步为执行thread_reduce，就是将单个线程内同一行的做一次reduce，
+//对于图3-4，m=0,2的8个float会执行一次reduce得到个最大值存到p_max[0]，m=2,3的8个float会执行一次reduce得到个最大值存到p_max[1]
     template<bool zero_init=true, typename Operator>
     __device__ inline void thread_reduce_(float (&frag)[2 * MMAS_M], Operator &op) {
         #pragma unroll
@@ -541,6 +549,7 @@ struct Softmax : public Softmax_base<Cta_tile, Kernel_traits> {
         }
     }
 
+//然后看下求max的过程，后续求sum过程一致，就不再赘述了。
     template<bool zero_init=true, typename Operator>
     __device__ inline void reduce_(float (&frag)[2 * MMAS_M], Operator &op, Smem_tile_red & smem_red) {
         thread_reduce_<zero_init>(frag, op);

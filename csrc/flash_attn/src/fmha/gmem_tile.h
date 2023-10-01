@@ -34,6 +34,10 @@
 
 namespace fmha {
 
+//先看下Gmem_tile_q，这里ROWS和COLS为一次处理的block大小，
+//对于q矩阵来说为16x32，BITS_PER_ELEMENT为q矩阵中每个元素为多少bit，由于为FP16，
+//这里为16，BYTES_PER_LDGS_ 表示一个线程一次load的字节数，这里为16字节，一行需要4个线程去load
+
 template<
     // The dimensions of the tile computed by the CTA.
     typename Cta_tile_,
@@ -64,6 +68,12 @@ struct Gmem_tile_qkv {
     // The number of LDGs needed to load a chunk of the Q matrix.
     static constexpr int LDGS = DivUpConstexpr(ROWS, ROWS_PER_LDG);
 
+/*
+然后看下构造函数，row和col计算出当前线程在这个tile中需要从哪行哪里开始load，
+通过binfo.sum_s_q + row跳过前边batch的token并定位到当前应该处理的是哪个token，
+row_stride就是num_heads x head_size，然后再跳过前边的head，
+再加上col就可以定位到当前起始的位置，即ptr
+*/
     // Ctor.
     template< typename BInfo >
     inline __device__ Gmem_tile_qkv(void *ptr_, const uint32_t row_stride_in_elts,
@@ -101,6 +111,15 @@ struct Gmem_tile_qkv {
         smem_tile.store(fetch_);
     }
 
+/*
+Gmem_tile_qkv的load就是从global mem加载到寄存器的过程，LDGS表示load当前tile需要几次，
+对于q矩阵为1，preds表示当前线程是否需要load对应的位置，由于q为16x32，因此只有前64线程会执行load，
+由于一个线程一次load16字节，所以这里使用uint4去load，结果存在了寄存器fetch_中。
+
+这一过程如下图所示，一个方块表示16B，方块中数字表示线程号，蓝色为第一个16x16矩阵，黄色为第二个16x16矩阵。
+018.png
+图 3-1
+*/
     inline __device__ void load() {
         int row_ = tidx_ / THREADS_PER_ROW;
         const void *ptrs[LDGS];

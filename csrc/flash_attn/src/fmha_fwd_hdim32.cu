@@ -3,7 +3,8 @@
 // Splitting the different head dimensions to different files to speed up compilation.
 
 #include "fmha_fwd_launch_template.h"
-
+// Launch_params里最核心的就是params，即FMHA_fprop_params，保存了kernel的上下文信息，
+// 比如Q，K，V的指针，stride，shape等信息，这里通过set_params_fprop保存了context。
 void run_fmha_fwd_hdim32(Launch_params<FMHA_fprop_params> &launch_params) {
     FP16_SWITCH(launch_params.params.is_bf16, ([&] {
         if (launch_params.params.seqlen_k == 128) {

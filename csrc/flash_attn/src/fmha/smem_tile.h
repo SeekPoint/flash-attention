@@ -34,7 +34,7 @@
 namespace fmha {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//smem_q的类型为Smem_tile_q，继承关系如下
 template<
     // The description of the tile computed by this CTA.
     typename Cta_tile,
@@ -120,6 +120,7 @@ struct Smem_tile_without_skews {
     // The type of elements that are stored in shared memory by each thread.
     using Store_type = typename Uint_from_size_in_bytes<BYTES_PER_STS>::Type;
 
+//先看下构造函数，主要就是设置当前线程应该写哪里
     // Ctor.
     inline __device__ Smem_tile_without_skews(void *smem, int tidx)
         : smem_(__nvvm_get_smem_pointer(smem)), tidx_(tidx) {
@@ -140,6 +141,10 @@ struct Smem_tile_without_skews {
         // this->smem_write_buffer_ = __shfl_sync(0xffffffff, 0, 0);
     }
 
+//gmem的commit其实执行的就是smem的store，由于q矩阵每个线程只需要store一次，即N为1，
+//因此只是在smem_write_offset_ 处写一次即可。
+//写完之后如下，每个格子为16B，即8个FP16，Ti为线程id，和global mem中对应，这个过程中不会bank冲突
+//图 3-2  019.png
     // Compute the store pointers.
     template< int N >
     inline __device__ void compute_store_pointers(uint32_t (&ptrs)[N]) {
@@ -417,6 +422,7 @@ struct Smem_tile_row_a : public Smem_tile_without_skews<Cta_tile,
     // The size of a single LDS in bytes.
     enum { BYTES_PER_LDS = 16 };
 
+//然后看下Smem_tile如何执行load，在构造函数中会计算出每个线程应该读哪行哪列，如图2-7
     // Ctor.
     inline __device__ Smem_tile_row_a(void *smem, int tidx) : Base(smem, tidx) {
 
@@ -451,6 +457,8 @@ struct Smem_tile_row_a : public Smem_tile_without_skews<Cta_tile,
         }
     }
 
+//然后执行load，通过ldmatrix将数据从shared mem load到了寄存器，执行结束之后，
+//寄存器变量和原始矩阵关系如图2-5，load结束后会计算smem_read_offset，指向下一个16x16矩阵，即k维度上边的下一个矩阵。
     // Load from shared memory.
     inline __device__ void load(Fragment (&a)[Mma_tile::MMAS_M], int ki) {
         #pragma unroll
